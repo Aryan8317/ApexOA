@@ -1,0 +1,5 @@
+@import "tailwindcss";
+@theme {
+  --font-headline-sm: "Outfit", sans-serif;
+  --text-headline-sm: 24px;
+}
