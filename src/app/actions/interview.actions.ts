@@ -3,6 +3,7 @@
 import { db } from "@/lib/db"
 import { auth } from "@/auth"
 import { GoogleGenerativeAI } from "@google/generative-ai"
+import { parseDomainFromType } from "@/lib/parseDomain"
 
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY!);
 
@@ -105,6 +106,7 @@ export async function generateMockInterview({
         jobDesc: `[Type: ${interviewType}] ${jobDesc}`,
         jobExperience,
         jsonMockResp: parsedMockResp,
+        domain: parseDomainFromType(interviewType),
       }
     });
 
@@ -210,5 +212,52 @@ export async function evaluateUserAnswer({
   } catch (error) {
     console.error("Error evaluating user answer:", error);
     return { success: false, error: "Failed to evaluate answer" };
+  }
+}
+
+// ─── AUTOSAVE: Save a draft answer for a question ───────────────────────────
+// Called automatically as the user types (debounced on the client).
+// Uses upsert: if a draft exists for this question, update it; otherwise create it.
+export async function saveDraft({
+  interviewId,
+  questionIndex,
+  draftAnswer,
+}: {
+  interviewId: string;
+  questionIndex: number;
+  draftAnswer: string;
+}) {
+  try {
+    await db.interviewDraft.upsert({
+      where: {
+        // @@unique([interviewId, questionIndex]) — the composite unique key
+        interviewId_questionIndex: { interviewId, questionIndex },
+      },
+      update: { draftAnswer },   // draft exists → just update the text
+      create: { interviewId, questionIndex, draftAnswer }, // first time → create a new row
+    });
+    return { success: true };
+  } catch (error) {
+    console.error("Error saving draft:", error);
+    return { success: false };
+  }
+}
+
+// ─── AUTOSAVE: Load all drafts for an interview ──────────────────────────────
+// Called once when the interview page loads to restore any saved work.
+export async function getDrafts(interviewId: string) {
+  try {
+    const drafts = await db.interviewDraft.findMany({
+      where: { interviewId },
+    });
+    // Return as a map: { questionIndex → draftAnswer } for easy lookup
+    const draftMap: Record<number, string> = {};
+    for (const d of drafts) {
+      draftMap[d.questionIndex] = d.draftAnswer;
+    }
+    return { success: true, drafts: draftMap };
+  } catch (error) {
+    console.error("Error loading drafts:", error);
+    return { success: true, drafts: {} };
   }
 }

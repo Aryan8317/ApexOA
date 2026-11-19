@@ -62,9 +62,11 @@ model Interview {
   jobDesc       String
   jobExperience Int
   jsonMockResp  Json
+  domain        String       @default("DSA")
   createdAt     DateTime     @default(now())
   user          User         @relation(fields: [userId], references: [id], onDelete: Cascade)
   userAnswers   UserAnswer[]
+  drafts        InterviewDraft[]
 }
 
 model UserAnswer {
@@ -77,4 +79,17 @@ model UserAnswer {
   rating        Int
   createdAt     DateTime  @default(now())
   interview     Interview @relation(fields: [interviewId], references: [id], onDelete: Cascade)
+}
+
+// Stores the in-progress draft for each question so users don't lose work
+model InterviewDraft {
+  id              String    @id @default(cuid())
+  interviewId     String
+  questionIndex   Int
+  draftAnswer     String
+  updatedAt       DateTime  @updatedAt
+
+  interview       Interview @relation(fields: [interviewId], references: [id], onDelete: Cascade)
+
+  @@unique([interviewId, questionIndex]) // one draft per question per interview
 }

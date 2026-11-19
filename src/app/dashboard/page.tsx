@@ -3,6 +3,9 @@ import { redirect } from "next/navigation";
 import { auth } from "@/auth";
 import { db } from "@/lib/db";
 import SkillMatrix from "./SkillMatrix";
+import { domainStats } from "@/lib/domainStats";
+import { parseDomainFromJobDesc } from "@/lib/parseDomain";
+import type { Domain } from "@/lib/domainStats";
 
 export default async function DashboardPage() {
   const session = await auth();
@@ -74,16 +77,40 @@ export default async function DashboardPage() {
     }
   }
 
-  // Calculate average rating across all answers
-  let totalRatingSum = 0;
-  let totalAnswersCount = 0;
-  interviews.forEach((interview) => {
-    interview.userAnswers.forEach((ans) => {
-      totalRatingSum += ans.rating;
-      totalAnswersCount++;
-    });
+  // Build a flat list of answers with domain tag for aggregation
+  const allAnswersWithDomain = interviews.flatMap(interview => {
+    const domain = parseDomainFromJobDesc(interview.jobDesc) ?? "DSA";
+    return interview.userAnswers
+      .filter(a => Number.isInteger(a.rating) && a.rating >= 1 && a.rating <= 10)
+      .map(a => ({ rating: a.rating, domain }));
   });
-  const averageRating = totalAnswersCount > 0 ? totalRatingSum / totalAnswersCount : 0;
+
+  const stats = domainStats(allAnswersWithDomain);
+
+  // Overall average (for metric card) — still answer-weighted
+  const allRatings = allAnswersWithDomain.map(a => a.rating);
+  const averageRating = allRatings.length > 0
+    ? allRatings.reduce((s, r) => s + r, 0) / allRatings.length
+    : 0;
+
+  // Strongest and focus area — derived from domain stats
+  const domainsWithData = (Object.entries(stats) as [Domain, { mean: number | null; count: number }][])
+    .filter(([_, s]) => s.mean !== null) as [Domain, { mean: number; count: number }][];
+
+  const DOMAIN_LABELS_SHORT: Record<Domain, string> = {
+    DSA: "DSA / Coding",
+    SYSTEM_DESIGN: "System Design",
+    CS_CORE: "CS Core",
+    BEHAVIORAL: "Behavioral",
+  };
+
+  let strongestArea = "—";
+  let focusArea = "—";
+  if (domainsWithData.length > 0) {
+    const sorted = domainsWithData.sort((a, b) => b[1].mean - a[1].mean);
+    strongestArea = DOMAIN_LABELS_SHORT[sorted[0][0]];
+    focusArea = DOMAIN_LABELS_SHORT[sorted[sorted.length - 1][0]];
+  }
 
   // Format date helper
   const formatDate = (date: Date) => {
@@ -93,17 +120,6 @@ export default async function DashboardPage() {
       year: "numeric",
     }).format(date);
   };
-
-  // Determine strengths and focus areas
-  let strongestArea = "Communication";
-  let focusArea = "System Design";
-  if (averageRating > 8) {
-    strongestArea = "Algorithmic Logic";
-    focusArea = "System Scaling";
-  } else if (averageRating > 0 && averageRating <= 6) {
-    strongestArea = "Communication";
-    focusArea = "Technical Depth";
-  }
 
   return (
     <div className="space-y-gutter">
@@ -294,7 +310,7 @@ export default async function DashboardPage() {
           
           {/* Recharts Radar Chart */}
           <div className="w-full my-2 relative">
-            <SkillMatrix averageRating={averageRating} />
+            <SkillMatrix stats={stats} />
           </div>
 
           {/* Legend/Summary */}

@@ -1,12 +1,12 @@
 "use client";
 
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Textarea } from "@/components/ui/textarea";
-import { evaluateUserAnswer } from "@/app/actions/interview.actions";
-import { Loader2, Video, VideoOff, Terminal } from "lucide-react";
+import { evaluateUserAnswer, saveDraft, getDrafts } from "@/app/actions/interview.actions";
+import { Loader2, Video, VideoOff, Terminal, Volume2, VolumeX } from "lucide-react";
 import Editor from "@monaco-editor/react";
 
 interface Question {
@@ -63,6 +63,69 @@ export default function InterviewClient({
   const [stream, setStream] = useState<MediaStream | null>(null);
   const [hasWebcam, setHasWebcam] = useState(true);
 
+  // ── AUTOSAVE STATE ──────────────────────────────────────────────────────────
+  // drafts: map of questionIndex → saved draft text (loaded once on mount)
+  const [drafts, setDrafts] = useState<Record<number, string>>({});
+  // saveStatus: shown in the "Auto-Saving" badge so the user gets feedback
+  const [saveStatus, setSaveStatus] = useState<"idle" | "saving" | "saved">("idle");
+  // debounceTimer: holds the setTimeout reference so we can clear/reset it
+  const debounceTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // ───────────────────────────────────────────────────────────────────────────
+
+  // ── TEXT-TO-SPEECH (Interviewer Voice) ─────────────────────────────────────
+  const [isSpeaking, setIsSpeaking] = useState(false);
+
+  const toggleSpeech = (textToRead: string) => {
+    if (typeof window === "undefined" || !("speechSynthesis" in window)) {
+      alert("Text-to-speech is not supported in this browser.");
+      return;
+    }
+
+    if (isSpeaking) {
+      window.speechSynthesis.cancel();
+      setIsSpeaking(false);
+      return;
+    }
+
+    window.speechSynthesis.cancel(); // Stop any previous speech
+    const utterance = new SpeechSynthesisUtterance(textToRead);
+    utterance.rate = 0.95; // Natural, measured interview pace
+    utterance.pitch = 1.0;
+
+    // Pick a natural English voice if available
+    const voices = window.speechSynthesis.getVoices();
+    const naturalVoice = voices.find(
+      v => v.lang.startsWith("en") && 
+      (v.name.includes("Google") || v.name.includes("Natural") || v.name.includes("Samantha") || v.name.includes("Daniel") || v.name.includes("Karen"))
+    );
+    if (naturalVoice) {
+      utterance.voice = naturalVoice;
+    }
+
+    utterance.onend = () => setIsSpeaking(false);
+    utterance.onerror = () => setIsSpeaking(false);
+
+    setIsSpeaking(true);
+    window.speechSynthesis.speak(utterance);
+  };
+
+  // Stop speech when navigating away or switching questions
+  useEffect(() => {
+    if (typeof window !== "undefined" && "speechSynthesis" in window) {
+      window.speechSynthesis.cancel();
+      setIsSpeaking(false);
+    }
+  }, [activeQuestionIndex]);
+
+  useEffect(() => {
+    return () => {
+      if (typeof window !== "undefined" && "speechSynthesis" in window) {
+        window.speechSynthesis.cancel();
+      }
+    };
+  }, []);
+  // ───────────────────────────────────────────────────────────────────────────
+
   const isMCQ = interviewType === "mcq" || interviewType.includes("mcq");
   const isCode = interviewType === "dsa" || (interviewType.startsWith("dsa") && !interviewType.includes("text") && !interviewType.includes("mcq"));
 
@@ -71,17 +134,63 @@ export default function InterviewClient({
       "Are you sure you want to leave this session? Your progress is saved, and you can resume it later from the dashboard."
     );
     if (confirmLeave) {
+      if (typeof window !== "undefined" && "speechSynthesis" in window) {
+        window.speechSynthesis.cancel();
+      }
       router.push("/dashboard");
     }
   };
 
   // Pre-populate code template if it's a DSA interview and answer is empty
+  // ── EFFECT 1: Load all saved drafts once when the interview first opens ──────
+  // This runs only on mount (empty [] dependency array).
+  // We fetch all drafts for this interview and store them in state.
   useEffect(() => {
-    if (isCode && !userAnswer) {
+    const loadDrafts = async () => {
+      const result = await getDrafts(interviewId);
+      if (result.success) {
+        setDrafts(result.drafts);
+      }
+    };
+    loadDrafts();
+  }, []); // [] = run once on mount, never again
+
+  // ── EFFECT 2: Restore draft OR show template when switching questions ────────
+  // Whenever activeQuestionIndex changes, check if there's a saved draft for it.
+  // If yes → restore it. If no → show the blank template (for code) or empty string.
+  useEffect(() => {
+    const savedDraft = drafts[activeQuestionIndex];
+    if (savedDraft) {
+      setUserAnswer(savedDraft);
+    } else if (isCode) {
       const extractedParams = extractParamsFromQuestion(currentQuestion?.question || "");
       setUserAnswer(getCodeTemplate(language, extractedParams));
+    } else {
+      setUserAnswer("");
     }
   }, [activeQuestionIndex, language, isCode]);
+
+  // ── EFFECT 3: Debounced autosave whenever userAnswer changes ─────────────────
+  // "Debounce" means: wait for the user to STOP typing for 1.5s, THEN save.
+  // If they keep typing, the timer resets each keystroke — avoids saving on every character.
+  useEffect(() => {
+    if (!userAnswer.trim()) return;
+
+    setSaveStatus("saving");
+
+    if (debounceTimer.current) clearTimeout(debounceTimer.current);
+
+    debounceTimer.current = setTimeout(async () => {
+      await saveDraft({ interviewId, questionIndex: activeQuestionIndex, draftAnswer: userAnswer });
+      setDrafts(prev => ({ ...prev, [activeQuestionIndex]: userAnswer }));
+      setSaveStatus("saved");
+      setTimeout(() => setSaveStatus("idle"), 2000);
+    }, 1500);
+
+    return () => {
+      if (debounceTimer.current) clearTimeout(debounceTimer.current);
+    };
+  }, [userAnswer]);
 
   useEffect(() => {
     let activeStream: MediaStream | null = null;
@@ -112,6 +221,11 @@ export default function InterviewClient({
   const submitAnswer = async () => {
     if (!userAnswer.trim()) return;
     
+    if (typeof window !== "undefined" && "speechSynthesis" in window) {
+      window.speechSynthesis.cancel();
+      setIsSpeaking(false);
+    }
+
     setIsSubmitting(true);
     const currentQuestion = questions[activeQuestionIndex];
     
@@ -123,6 +237,13 @@ export default function InterviewClient({
         userAnswer: userAnswer
       });
       
+      // Clear the draft for the submitted question from local state
+      setDrafts(prev => {
+        const updated = { ...prev };
+        delete updated[activeQuestionIndex];
+        return updated;
+      });
+      setSaveStatus("idle");
       setUserAnswer("");
       
       if (activeQuestionIndex < questions.length - 1) {
@@ -200,7 +321,9 @@ export default function InterviewClient({
           Exit Workspace
         </button>
         <span className="text-[11px] font-bold px-2.5 py-1 rounded-full bg-surface-cream text-on-surface-variant border border-outline-variant/30 uppercase tracking-wider">
-          Auto-Saving
+          {saveStatus === "saving" && "Saving..."}
+          {saveStatus === "saved" && "Saved ✓"}
+          {saveStatus === "idle" && "Auto-Save On"}
         </span>
       </div>
 
@@ -209,8 +332,32 @@ export default function InterviewClient({
       <div className="space-y-6">
         <Card className="border border-outline-variant/30 bg-surface-white/60">
           <CardContent className="p-6">
-            <div className="flex items-center gap-2 text-sm font-semibold text-primary mb-2">
-              Question {activeQuestionIndex + 1} of {questions.length}
+            <div className="flex items-center justify-between mb-3">
+              <div className="flex items-center gap-2 text-sm font-semibold text-primary">
+                Question {activeQuestionIndex + 1} of {questions.length}
+              </div>
+              <button
+                type="button"
+                onClick={() => toggleSpeech(isMCQ ? mcqData.questionText : (currentQuestion?.question || ""))}
+                className={`flex items-center gap-1.5 text-xs font-semibold px-3 py-1.5 rounded-full border transition-all ${
+                  isSpeaking
+                    ? "bg-primary text-surface-white border-primary shadow-sm ring-2 ring-primary/20 animate-pulse"
+                    : "bg-surface-cream text-on-surface hover:text-primary hover:border-primary/40 border-outline-variant/40"
+                }`}
+                title={isSpeaking ? "Stop voice" : "Listen to interviewer read question"}
+              >
+                {isSpeaking ? (
+                  <>
+                    <VolumeX className="w-3.5 h-3.5" />
+                    <span>Stop Voice</span>
+                  </>
+                ) : (
+                  <>
+                    <Volume2 className="w-3.5 h-3.5 text-primary" />
+                    <span>Read Aloud</span>
+                  </>
+                )}
+              </button>
             </div>
             <h2 className="text-xl font-bold leading-relaxed text-on-surface">
               {isMCQ ? mcqData.questionText : currentQuestion?.question}
