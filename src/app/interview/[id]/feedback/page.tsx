@@ -10,8 +10,11 @@ export default async function FeedbackPage({ params }: { params: Promise<{ id: s
     redirect("/login");
   }
 
-  const interview = await db.interview.findUnique({
-    where: { id },
+  const interview = await db.interview.findFirst({
+    where: { 
+      id,
+      userId: session.user.id,
+    },
     include: {
       userAnswers: {
         orderBy: { createdAt: 'asc' }
@@ -25,7 +28,7 @@ export default async function FeedbackPage({ params }: { params: Promise<{ id: s
 
   const answers = interview.userAnswers;
   const averageScore = Math.round(
-    answers.reduce((acc: number, curr: any) => acc + curr.rating, 0) / answers.length
+    answers.reduce((acc: number, curr: { rating: number }) => acc + curr.rating, 0) / answers.length
   );
 
   const handleSignOut = async () => {

@@ -227,15 +227,17 @@ export default function InterviewClient({
     }
 
     setIsSubmitting(true);
-    const currentQuestion = questions[activeQuestionIndex];
     
     try {
-      await evaluateUserAnswer({
+      const res = await evaluateUserAnswer({
         interviewId,
-        question: currentQuestion.question,
-        correctAnswer: currentQuestion.correctAnswer,
+        questionIndex: activeQuestionIndex,
         userAnswer: userAnswer
       });
+      
+      if (!res.success) {
+        throw new Error(res.error || "Failed to evaluate answer");
+      }
       
       // Clear the draft for the submitted question from local state
       setDrafts(prev => {

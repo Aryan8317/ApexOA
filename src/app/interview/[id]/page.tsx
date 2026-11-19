@@ -11,8 +11,11 @@ export default async function InterviewPage({ params }: { params: Promise<{ id: 
     redirect("/login");
   }
 
-  const interview = await db.interview.findUnique({
-    where: { id },
+  const interview = await db.interview.findFirst({
+    where: { 
+      id,
+      userId: session.user.id,
+    },
   });
 
   if (!interview) {
