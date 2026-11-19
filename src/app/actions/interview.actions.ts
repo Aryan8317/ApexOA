@@ -95,7 +95,7 @@ export async function generateMockInterview({
       parsedMockResp = JSON.parse(textResponse.substring(start, end + 1));
     } catch (e) {
       console.warn("Robust JSON array parse failed, trying direct regex cleanup:", e);
-      let cleanText = textResponse.replace(/```json/gi, '').replace(/```/g, '').trim();
+      const cleanText = textResponse.replace(/```json/gi, '').replace(/```/g, '').trim();
       parsedMockResp = JSON.parse(cleanText);
     }
 
@@ -119,20 +119,56 @@ export async function generateMockInterview({
 
 export async function evaluateUserAnswer({
   interviewId,
-  question,
-  correctAnswer,
+  questionIndex,
   userAnswer
 }: {
   interviewId: string;
-  question: string;
-  correctAnswer: string;
+  questionIndex: number;
   userAnswer: string;
 }) {
   try {
-    const interview = await db.interview.findUnique({
-      where: { id: interviewId }
+    const session = await auth();
+    if (!session || !session.user || !session.user.id) {
+      return { success: false, error: "Unauthorized access" };
+    }
+
+    const interview = await db.interview.findFirst({
+      where: {
+        id: interviewId,
+        userId: session.user.id
+      }
     });
-    const isMCQ = interview?.jobDesc.match(/\[Type:\s*[^\]]*mcq[^\]]*\]/) !== null;
+
+    if (!interview) {
+      return { success: false, error: "Interview not found or unauthorized" };
+    }
+
+    let mockQuestions: Array<{ question: string; correctAnswer: string }> = [];
+    try {
+      mockQuestions = typeof interview.jsonMockResp === "string"
+        ? JSON.parse(interview.jsonMockResp)
+        : (interview.jsonMockResp as Array<{ question: string; correctAnswer: string }>);
+    } catch (e) {
+      console.error("Failed to parse jsonMockResp:", e);
+      return { success: false, error: "Failed to parse interview questions" };
+    }
+
+    if (
+      typeof questionIndex !== "number" ||
+      questionIndex < 0 ||
+      questionIndex >= mockQuestions.length
+    ) {
+      return { success: false, error: "Invalid question index" };
+    }
+
+    const currentQ = mockQuestions[questionIndex];
+    if (!currentQ || !currentQ.question || !currentQ.correctAnswer) {
+      return { success: false, error: "Question data is invalid or missing" };
+    }
+
+    const question = currentQ.question;
+    const correctAnswer = currentQ.correctAnswer;
+    const isMCQ = interview.jobDesc.match(/\[Type:\s*[^\]]*mcq[^\]]*\]/) !== null;
 
     const prompt = `
       Act as an expert technical interviewer evaluating a candidate's answer.
@@ -193,11 +229,11 @@ export async function evaluateUserAnswer({
       parsedCritique = JSON.parse(textResponse.substring(start, end + 1));
     } catch (e) {
       console.warn("Robust JSON object parse failed, trying direct regex cleanup:", e);
-      let cleanText = textResponse.replace(/```json/gi, '').replace(/```/g, '').trim();
+      const cleanText = textResponse.replace(/```json/gi, '').replace(/```/g, '').trim();
       parsedCritique = JSON.parse(cleanText);
     }
 
-    const answerRecord = await db.userAnswer.create({
+    await db.userAnswer.create({
       data: {
         interviewId,
         question,
@@ -206,6 +242,11 @@ export async function evaluateUserAnswer({
         feedback: parsedCritique.feedback,
         rating: parsedCritique.rating,
       }
+    });
+
+    // Delete any draft for this question now that it's submitted
+    await db.interviewDraft.deleteMany({
+      where: { interviewId, questionIndex }
     });
 
     return { success: true, feedback: parsedCritique };
@@ -228,6 +269,19 @@ export async function saveDraft({
   draftAnswer: string;
 }) {
   try {
+    const session = await auth();
+    if (!session || !session.user || !session.user.id) {
+      return { success: false, error: "Unauthorized access" };
+    }
+
+    const interview = await db.interview.findFirst({
+      where: { id: interviewId, userId: session.user.id }
+    });
+
+    if (!interview) {
+      return { success: false, error: "Interview not found or unauthorized" };
+    }
+
     await db.interviewDraft.upsert({
       where: {
         // @@unique([interviewId, questionIndex]) — the composite unique key
@@ -239,7 +293,7 @@ export async function saveDraft({
     return { success: true };
   } catch (error) {
     console.error("Error saving draft:", error);
-    return { success: false };
+    return { success: false, error: "Failed to save draft" };
   }
 }
 
@@ -247,6 +301,19 @@ export async function saveDraft({
 // Called once when the interview page loads to restore any saved work.
 export async function getDrafts(interviewId: string) {
   try {
+    const session = await auth();
+    if (!session || !session.user || !session.user.id) {
+      return { success: false, error: "Unauthorized access", drafts: {} };
+    }
+
+    const interview = await db.interview.findFirst({
+      where: { id: interviewId, userId: session.user.id }
+    });
+
+    if (!interview) {
+      return { success: false, error: "Interview not found or unauthorized", drafts: {} };
+    }
+
     const drafts = await db.interviewDraft.findMany({
       where: { interviewId },
     });
@@ -258,6 +325,6 @@ export async function getDrafts(interviewId: string) {
     return { success: true, drafts: draftMap };
   } catch (error) {
     console.error("Error loading drafts:", error);
-    return { success: true, drafts: {} };
+    return { success: false, error: "Failed to load drafts", drafts: {} };
   }
 }
