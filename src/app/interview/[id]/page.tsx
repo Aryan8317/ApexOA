@@ -23,14 +23,19 @@ export default async function InterviewPage({ params }: { params: Promise<{ id: 
   }
 
   // Parse JSON if it's a string, or use directly if it's already an array
-  let mockQuestions = [];
+  let rawQuestions: Array<{ question: string; correctAnswer?: string }> = [];
   try {
-    mockQuestions = typeof interview.jsonMockResp === 'string' 
+    rawQuestions = typeof interview.jsonMockResp === 'string' 
       ? JSON.parse(interview.jsonMockResp) 
-      : interview.jsonMockResp;
+      : interview.jsonMockResp as Array<{ question: string; correctAnswer?: string }>;
   } catch (error) {
     console.error("Failed to parse mock questions", error);
   }
+
+  // Security projection: Never leak correctAnswer to the client during an active assessment!
+  const sanitizedQuestions = rawQuestions.map((q) => ({
+    question: q.question,
+  }));
 
   const typeMatch = interview.jobDesc.match(/^\[Type:\s*([^\]]+)\]/);
   const interviewType = typeMatch ? typeMatch[1] : "dsa";
@@ -53,7 +58,7 @@ export default async function InterviewPage({ params }: { params: Promise<{ id: 
             Role: {interview.jobPosition} • Format: {interviewType.toUpperCase()} • Experience: {interview.jobExperience} years
           </p>
         </div>
-        <InterviewClient interviewId={interview.id} questions={mockQuestions} interviewType={interviewType} />
+        <InterviewClient interviewId={interview.id} questions={sanitizedQuestions} interviewType={interviewType} />
       </main>
     </div>
   );
